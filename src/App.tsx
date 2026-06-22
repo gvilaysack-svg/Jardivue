@@ -39,12 +39,32 @@ function App() {
 const [selectedLibraryPlant, setSelectedLibraryPlant] = useState("");
   const [zones, setZones] = useState<Zone[]>([]);
   const [currentMonth] = useState(
+    
   new Date().toLocaleString("fr-FR", { month: "long" })
 );
+const months = [
+  "janvier",
+  "février",
+  "mars",
+  "avril",
+  "mai",
+  "juin",
+  "juillet",
+  "août",
+  "septembre",
+  "octobre",
+  "novembre",
+  "décembre",
+];
+
+const [selectedMonth, setSelectedMonth] = useState(currentMonth);
+const [maintenanceDone, setMaintenanceDone] = useState<any[]>([]);
   const [plantLogs, setPlantLogs] = useState<any[]>([]);
+  
 const [newLog, setNewLog] = useState("");
 const [logImage, setLogImage] = useState<File | null>(null);
   const [selectedPlant, setSelectedPlant] = useState<Plant | null>(null);
+  
   const [draggedPlantId, setDraggedPlantId] = useState<number | null>(null);
   const [showPlantNames, setShowPlantNames] = useState(false);
   const [showAdultSize, setShowAdultSize] = useState(true);
@@ -55,7 +75,7 @@ const [selectedDesignZone, setSelectedDesignZone] = useState("");
   const [newName, setNewName] = useState("");
   const [newLatinName, setNewLatinName] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
-
+const [allPlantLogs, setAllPlantLogs] = useState<any[]>([]);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [panMode, setPanMode] = useState(false);
@@ -76,6 +96,8 @@ const [selectedDesignZone, setSelectedDesignZone] = useState("");
   getPlants();
   getZones();
   getPlantLibrary();
+  getMaintenanceDone();
+  getAllPlantLogs();
 }, []);
 
   async function getPlants() {
@@ -83,6 +105,40 @@ const [selectedDesignZone, setSelectedDesignZone] = useState("");
     if (error) return console.error(error);
     setPlants(data || []);
   }
+  async function markTaskDone(
+  plantId: number,
+  taskType: string
+) {
+  await supabase
+    .from("maintenance_done")
+    .insert({
+      plant_id: plantId,
+      task_type: taskType,
+      done_month: currentMonth,
+    });
+
+  getMaintenanceDone();
+}
+async function getAllPlantLogs() {
+  const { data, error } = await supabase
+    .from("plant_logs")
+    .select("*")
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    console.error(error);
+    return;
+  }
+
+  setAllPlantLogs(data || []);
+}
+  async function getMaintenanceDone() {
+  const { data } = await supabase
+    .from("maintenance_done")
+    .select("*");
+
+  setMaintenanceDone(data || []);
+}
 
   async function getZones() {
     const { data, error } = await supabase.from("zones").select("*");
@@ -330,7 +386,17 @@ async function addPlantFromLibrary() {
       return [plant];
     });
   }
+function focusPlantOnMap(plant: Plant) {
+  setSelectedPlant(plant);
+  setHighlightedPlantId(plant.id);
+  getPlantLogs(plant.id);
 
+  setZoom(1.5);
+  setPan({
+    x: 450 - plant.pos_x * 1.5,
+    y: 450 - plant.pos_y * 1.5,
+  });
+}
   async function uploadImage(event: React.ChangeEvent<HTMLInputElement>) {
     if (!selectedPlant) return;
 
@@ -441,31 +507,62 @@ const occupiedArea = plants.reduce((total, plant) => {
 }, 0);
 
 const availableArea = gardenArea - occupiedArea;
+const totalGardenValue = plants.reduce(
+  (total, plant) => total + (plant.purchase_price || 0),
+  0
+);
+const photoCount = plantLogs.filter(
+  (log) => log.image_url
+).length;
 
+const observationCount = plantLogs.length;
 
+const lastObservation =
+  plantLogs.length > 0
+    ? plantLogs[0].created_at
+    : null;
+let followStatus = "🔴 Aucun suivi";
+let followColor = "#c62828";
 
-const currentMonthCapitalized =
-  currentMonth.charAt(0).toUpperCase() + currentMonth.slice(1);
+if (lastObservation) {
+  const daysSinceLastLog = Math.floor(
+    (Date.now() - new Date(lastObservation).getTime()) /
+      (1000 * 60 * 60 * 24)
+  );
 
-function includesCurrentMonth(months: string) {
-  if (!months) return false;
-
-  return months
-    .split(",")
-    .map((month) => month.trim().toLowerCase())
-    .includes(currentMonth.toLowerCase());
+  if (daysSinceLastLog <= 30) {
+    followStatus = "🟢 Suivi récent";
+    followColor = "#2e7d32";
+  } else if (daysSinceLastLog <= 60) {
+    followStatus = "🟠 À surveiller";
+    followColor = "#ef6c00";
+  }
 }
 
-const wateringTasks = plants.filter((plant) =>
-  includesCurrentMonth(plant.watering_months)
+
+
+
+function includesSelectedMonth(monthsText: string) {
+  if (!monthsText) return false;
+
+  return monthsText
+    .split(",")
+    .map((month) => month.trim().toLowerCase())
+    .includes(selectedMonth.toLowerCase());
+}
+
+const wateringTasks = plants.filter(
+  (plant) =>
+    includesSelectedMonth(plant.watering_months) &&
+    !isTaskDone(plant.id, "watering")
 );
 
 const pruningTasks = plants.filter((plant) =>
-  includesCurrentMonth(plant.pruning_months)
+  includesSelectedMonth(plant.pruning_months)
 );
 
 const fertilizingTasks = plants.filter((plant) =>
-  includesCurrentMonth(plant.fertilizing_months)
+  includesSelectedMonth(plant.fertilizing_months)
 );
 function getPlantAge(dateString: string) {
   if (!dateString) return "Non renseigné";
@@ -528,145 +625,385 @@ const selectedZoneArea =
 
 
 
+function isTaskDone(plantId: number, taskType: string) {
+  return maintenanceDone.some(
+    (task) =>
+      task.plant_id === plantId &&
+      task.task_type === taskType &&
+      task.done_month === currentMonth
+  );
+}
 
+const plantLogsForThisPlant = selectedPlant
+  ? plantLogs.filter(
+      (log) => log.plant_id === selectedPlant.id
+    )
+  : [];
+
+const lastLogForThisPlant = plantLogsForThisPlant[0];
+let plantFollowDot = "🔴";
+
+if (lastLogForThisPlant) {
+  const daysSinceLastLog = Math.floor(
+    (Date.now() - new Date(lastLogForThisPlant.created_at).getTime()) /
+      (1000 * 60 * 60 * 24)
+  );
+
+  if (daysSinceLastLog < 30) {
+    plantFollowDot = "🟢";
+  } else if (daysSinceLastLog < 90) {
+    plantFollowDot = "🟠";
+  }
+}
+function includesSelectedMonthForCalendar(monthsText: string, month: string) {
+  if (!monthsText) return false;
+
+  return monthsText
+    .split(",")
+    .map((m) => m.trim().toLowerCase())
+    .includes(month.toLowerCase());
+}
 return (
-    <div style={{ padding: 20 }}>
-      <h1>JardiVue 🌿</h1>
-      <div
+  <div
+    style={{
+      minHeight: "100vh",
+      display: "grid",
+      gridTemplateColumns: "220px 1fr",
+      background: "linear-gradient(180deg, #f3f0e8 0%, #e8efe4 100%)",
+      fontFamily: "Inter, system-ui, Arial",
+      color: "#263128",
+    }}
+  >
+    <aside
+      style={{
+        background: "#1f4d2b",
+        color: "white",
+        padding: 24,
+        minHeight: "100vh",
+        boxShadow: "8px 0 30px rgba(31,77,43,0.18)",
+      }}
+    >
+      <h2 style={{ marginTop: 0 }}>JardiVue</h2>
+
+      <div style={{ opacity: 0.75, marginBottom: 30 }}>
+        Carnet de jardin
+      </div>
+
+      <nav style={{ display: "grid", gap: 12 }}>
+       <div
   style={{
-    background: "#fff8e1",
-    border: "1px solid #ffd54f",
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 20,
+    padding: 14,
+    borderRadius: 14,
+    background: "rgba(255,255,255,0.12)",
+    fontWeight: "bold",
   }}
 >
-  <h2>📅 Travaux du mois ({currentMonth})</h2>
-
-  <h3>💧 Arrosage</h3>
-
-  {wateringTasks.length > 0 ? (
-    wateringTasks.map((plant) => (
-      <p key={`water-${plant.id}`}>
-        • {plant.name}
-      </p>
-    ))
-  ) : (
-    <p>Aucun arrosage prévu.</p>
-  )}
-
-  <h3>✂️ Taille</h3>
-
-  {pruningTasks.length > 0 ? (
-    pruningTasks.map((plant) => (
-      <p key={`prune-${plant.id}`}>
-        • {plant.name}
-      </p>
-    ))
-  ) : (
-    <p>Aucune taille prévue.</p>
-  )}
-
-  <h3>🌱 Engrais</h3>
-
-  {fertilizingTasks.length > 0 ? (
-    fertilizingTasks.map((plant) => (
-      <p key={`fert-${plant.id}`}>
-        • {plant.name}
-      </p>
-    ))
-  ) : (
-    <p>Aucun engrais prévu.</p>
-  )}
+  🏠 Tableau de bord
 </div>
+
+<div style={{ padding: 14 }}>🗺️ Carte</div>
+<div style={{ padding: 14 }}>📅 Travaux</div>
+<div style={{ padding: 14 }}>🌱 Plantes</div>
+<div style={{ padding: 14 }}>📷 Journal</div>
+      </nav>
       <div
+  style={{
+    marginTop: 24,
+    padding: 16,
+    background: "rgba(255,255,255,0.10)",
+    borderRadius: 16,
+  }}
+>
+  <div style={{ fontSize: 12, opacity: 0.8 }}>Surface</div>
+  <div style={{ fontSize: 26, fontWeight: "bold" }}>4700 m²</div>
+
+  <div style={{ marginTop: 12, fontSize: 12, opacity: 0.8 }}>
+    Plantes
+  </div>
+  <div style={{ fontSize: 26, fontWeight: "bold" }}>
+    {plants.length}
+  </div>
+
+  <div style={{ marginTop: 12, fontSize: 12, opacity: 0.8 }}>
+    Surface libre
+  </div>
+  <div style={{ fontSize: 22, fontWeight: "bold" }}>
+    {availableArea.toFixed(0)} m²
+  </div>
+</div>
+
+<div
+  style={{
+    marginTop: 16,
+    padding: 16,
+    background: "rgba(255,255,255,0.10)",
+    borderRadius: 16,
+  }}
+>
+  <div style={{ fontWeight: "bold", marginBottom: 8 }}>
+    📅 Ce mois-ci
+  </div>
+
+  <div>💧 {wateringTasks.length} arrosages</div>
+  <div>✂️ {pruningTasks.length} tailles</div>
+  <div>🌱 {fertilizingTasks.length} engrais</div>
+</div>
+    </aside>
+
+    <main style={{ padding: 24 }}>
+  
+    <div
+  style={{
+    background: "linear-gradient(135deg, #1f4d2b, #386b43)",
+    color: "white",
+    padding: 28,
+    borderRadius: 28,
+    marginBottom: 24,
+    boxShadow: "0 18px 40px rgba(31,77,43,0.25)",
+  }}
+>
+  <div
+    style={{
+      fontSize: 14,
+      opacity: 0.8,
+      marginBottom: 8,
+    }}
+  >
+    Carnet de jardin
+  </div>
+
+  <h1
+    style={{
+      margin: 0,
+      fontSize: 40,
+      letterSpacing: -1,
+    }}
+  >
+    JardiVue
+  </h1>
+
+  <p
+    style={{
+      marginTop: 10,
+      opacity: 0.85,
+      fontSize: 16,
+    }}
+  >
+    Suivi, plantations et entretien de mon jardin
+  </p>
+</div>
+      
+<div
   style={{
     display: "flex",
     flexWrap: "wrap",
-    gap: 12,
+    gap: 16,
     marginBottom: 20,
   }}
 >
-  <div
-    style={{
-      padding: 12,
-      background: "#fff",
-      borderRadius: 10,
-      border: "1px solid #ddd",
-      minWidth: 130,
-    }}
-  >
-    <strong>🌿 Plantes</strong>
-    <div>{totalPlants}</div>
-  </div>
 
-  <div
-    style={{
-      padding: 12,
-      background: "#fff",
-      borderRadius: 10,
-      border: "1px solid #ddd",
-      minWidth: 130,
-    }}
-  >
+  <div style={{
+    padding: 12,
+    background: "#ffffff",
+    boxShadow: "0 12px 30px rgba(31,77,43,0.08)",
+    borderRadius: 16,
+    border: "1px solid rgba(31,77,43,0.08)",
+    minWidth: 130,
+  }}>
     <strong>📐 Terrain</strong>
     <div>{gardenArea} m²</div>
   </div>
 
-  <div
-    style={{
-      padding: 12,
-      background: "#fff",
-      borderRadius: 10,
-      border: "1px solid #ddd",
-      minWidth: 130,
-    }}
-  >
+  <div style={{
+    padding: 12,
+    background: "#ffffff",
+    boxShadow: "0 12px 30px rgba(31,77,43,0.08)",
+    borderRadius: 16,
+    border: "1px solid rgba(31,77,43,0.08)",
+    minWidth: 130,
+  }}>
     <strong>🌳 Surface occupée</strong>
     <div>{occupiedArea.toFixed(1)} m²</div>
   </div>
 
-  <div
-    style={{
-      padding: 12,
-      background: "#fff",
-      borderRadius: 10,
-      border: "1px solid #ddd",
-      minWidth: 130,
-    }}
-  >
-    <strong>✅ Surface libre</strong>
-    <div>{availableArea.toFixed(1)} m²</div>
+  <div style={{
+    padding: 12,
+    background: "#ffffff",
+    boxShadow: "0 12px 30px rgba(31,77,43,0.08)",
+    borderRadius: 16,
+    border: "1px solid rgba(31,77,43,0.08)",
+    minWidth: 130,
+  }}>
+    <strong>💰 Valeur jardin</strong>
+    <div>{totalGardenValue.toFixed(2)} €</div>
   </div>
 
   {Object.entries(plantTypeCounts).map(([type, count]) => (
     <div
       key={type}
       style={{
-        padding: 12,
-        background: "#fff",
-        borderRadius: 10,
-        border: "1px solid #ddd",
-        minWidth: 130,
+        padding: 20,
+        background: "linear-gradient(145deg, #ffffff, #f7faf7)",
+        boxShadow: "0 15px 35px rgba(31,77,43,0.15)",
+        borderRadius: 24,
+        border: "1px solid rgba(31,77,43,0.10)",
+        minWidth: 180,
+        textAlign: "center",
       }}
     >
-      <strong>{type}</strong>
-      <div>{count}</div>
+      <div style={{ fontSize: 32, marginBottom: 8 }}>
+        {type === "Arbre" ? "🌳" :
+         type === "Palmier" ? "🌴" :
+         type === "Arbuste" ? "🌿" : "🪴"}
+      </div>
+
+      <div style={{ fontSize: 18, fontWeight: "bold", color: "#1f4d2b" }}>
+        {type}
+      </div>
+
+      <div style={{ fontSize: 28, fontWeight: "bold", color: "#386b43", marginTop: 8 }}>
+        {count}
+      </div>
     </div>
   ))}
+
+  
+
+  <h2 style={{ marginTop: 0 }}>
+    📅 Calendrier annuel des travaux
+  </h2>
+
+  <div
+    style={{
+      display: "grid",
+      gridTemplateColumns: "repeat(3, 1fr)",
+      gap: 16,
+    }}
+  >
+    {[
+      "Janvier",
+      "Février",
+      "Mars",
+      "Avril",
+      "Mai",
+      "Juin",
+      "Juillet",
+      "Août",
+      "Septembre",
+      "Octobre",
+      "Novembre",
+      "Décembre",
+    ].map((month) => (
+      <div
+        key={month}
+        style={{
+          padding: 14,
+          borderRadius: 14,
+          background: "#f8faf8",
+          border: "1px solid #e6eee6",
+        }}
+      >
+        <strong>{month}</strong>
+
+        <div style={{ marginTop: 10, fontSize: 13 }}>
+  {plants
+    .filter((plant) =>
+      includesSelectedMonthForCalendar(plant.watering_months, month)
+    )
+   .map((plant) => (
+  <div
+    key={`water-${month}-${plant.id}`}
+    onClick={() => focusPlantOnMap(plant)}
+    style={{
+  cursor: "pointer",
+  padding: "6px 8px",
+  borderRadius: 8,
+  transition: "all 0.2s ease",
+}}
+onMouseEnter={(e) => {
+  e.currentTarget.style.background = "#e8f5e9";
+}}
+onMouseLeave={(e) => {
+  e.currentTarget.style.background = "transparent";
+}}
+  >
+    💧 {plant.name}
+  </div>
+))}
+
+  {plants
+    .filter((plant) =>
+      includesSelectedMonthForCalendar(plant.pruning_months, month)
+    )
+    .map((plant) => (
+      <div
+  key={`prune-${month}-${plant.id}`}
+  onClick={() => focusPlantOnMap(plant)}
+ style={{
+  cursor: "pointer",
+  padding: "6px 8px",
+  borderRadius: 8,
+  transition: "all 0.2s ease",
+}}
+  onMouseEnter={(e) => {
+  e.currentTarget.style.background = "#e8f5e9";
+}}
+onMouseLeave={(e) => {
+  e.currentTarget.style.background = "transparent";
+}}
+>
+  ✂️ {plant.name}
 </div>
+    ))}
 
-
+  {plants
+    .filter((plant) =>
+      includesSelectedMonthForCalendar(plant.fertilizing_months, month)
+    )
+    .map((plant) => (
+     <div
+  key={`fert-${month}-${plant.id}`}
+  onClick={() => focusPlantOnMap(plant)}
+ style={{
+  cursor: "pointer",
+  padding: "6px 8px",
+  borderRadius: 8,
+  transition: "all 0.2s ease",
+}}
+onMouseEnter={(e) => {
+  e.currentTarget.style.background = "#e8f5e9";
+}}
+onMouseLeave={(e) => {
+  e.currentTarget.style.background = "transparent";
+}}
+>
+  🌱 {plant.name}
+</div>
+    ))}
+</div>
+      </div>
+    ))}
+  </div>
+</div>
       <div style={{ marginBottom: 16 }}>
         <select
   value={selectedLibraryPlant}
   onChange={(e) => setSelectedLibraryPlant(e.target.value)}
-  style={{ padding: 8, marginRight: 8 }}
+  style={{
+  padding: "10px 14px",
+  borderRadius: 14,
+  border: "1px solid rgba(31,77,43,0.12)",
+  background: "white",
+  color: "#1f4d2b",
+  fontWeight: "bold",
+  cursor: "pointer",
+  boxShadow: "0 6px 16px rgba(31,77,43,0.08)",
+}}
 >
   <option value="">Choisir une plante</option>
 
   {plantLibrary.map((plant) => (
-    <option key={plant.id} value={plant.id}>
+    <option key={`water-${plant.id}`} value={plant.id}>
       {plant.name}
     </option>
   ))}
@@ -674,7 +1011,16 @@ return (
 
 <button
   onClick={addPlantFromLibrary}
-  style={{ padding: 8, marginRight: 8 }}
+  style={{
+  padding: "10px 14px",
+  borderRadius: 14,
+  border: "1px solid rgba(31,77,43,0.12)",
+  background: "white",
+  color: "#1f4d2b",
+  fontWeight: "bold",
+  cursor: "pointer",
+  boxShadow: "0 6px 16px rgba(31,77,43,0.08)",
+}}
 >
   🌿 Ajouter depuis la bibliothèque
 </button>
@@ -682,21 +1028,48 @@ return (
           placeholder="Nom de la plante"
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
-          style={{ padding: 8, marginRight: 8 }}
+         style={{
+  padding: "10px 14px",
+  borderRadius: 14,
+  border: "1px solid rgba(31,77,43,0.12)",
+  background: "white",
+  color: "#1f4d2b",
+  fontWeight: "bold",
+  cursor: "pointer",
+  boxShadow: "0 6px 16px rgba(31,77,43,0.08)",
+}}
         />
 
         <input
           placeholder="Nom latin"
           value={newLatinName}
           onChange={(e) => setNewLatinName(e.target.value)}
-          style={{ padding: 8, marginRight: 8 }}
+         style={{
+  padding: "10px 14px",
+  borderRadius: 14,
+  border: "1px solid rgba(31,77,43,0.12)",
+  background: "white",
+  color: "#1f4d2b",
+  fontWeight: "bold",
+  cursor: "pointer",
+  boxShadow: "0 6px 16px rgba(31,77,43,0.08)",
+}}
         />
 
         <button onClick={addPlant} style={{ padding: 8, marginRight: 8 }}>
           ➕ Ajouter une plante
         </button>
 
-        <button onClick={() => setShowPlantNames(!showPlantNames)} style={{ padding: 8 }}>
+        <button onClick={() => setShowPlantNames(!showPlantNames)} style={{
+  padding: "10px 14px",
+  borderRadius: 14,
+  border: "1px solid rgba(31,77,43,0.12)",
+  background: "white",
+  color: "#1f4d2b",
+  fontWeight: "bold",
+  cursor: "pointer",
+  boxShadow: "0 6px 16px rgba(31,77,43,0.08)",
+}}>
           {showPlantNames ? "Masquer les noms" : "Afficher les noms"}
         </button>
       </div>
@@ -706,7 +1079,20 @@ return (
 >
   {showAdultSize ? "Masquer taille adulte" : "Afficher taille adulte"}
 </button>
-      <div style={{ marginBottom: 16 }}>
+      <div
+  style={{
+    marginBottom: 20,
+    padding: 14,
+    background: "rgba(255,255,255,0.85)",
+    borderRadius: 24,
+    boxShadow: "0 12px 30px rgba(31,77,43,0.10)",
+    border: "1px solid rgba(31,77,43,0.08)",
+    display: "flex",
+    flexWrap: "wrap",
+    gap: 8,
+    alignItems: "center",
+  }}
+>
         <input
           placeholder="Rechercher une plante"
           value={searchTerm}
@@ -717,15 +1103,42 @@ return (
           style={{ padding: 8, marginRight: 8, width: 260 }}
         />
 
-        <button onClick={searchPlant} style={{ padding: 8, marginRight: 8 }}>
+        <button onClick={searchPlant} style={{
+  padding: "10px 14px",
+  borderRadius: 14,
+  border: "1px solid rgba(31,77,43,0.12)",
+  background: "white",
+  color: "#1f4d2b",
+  fontWeight: "bold",
+  cursor: "pointer",
+  boxShadow: "0 6px 16px rgba(31,77,43,0.08)",
+}}>
           🔍 Rechercher
         </button>
 
-        <button onClick={() => setZoom((z) => Math.min(z + 0.2, 3))} style={{ padding: 8 }}>
+        <button onClick={() => setZoom((z) => Math.min(z + 0.2, 3))} style={{
+  padding: "10px 14px",
+  borderRadius: 14,
+  border: "1px solid rgba(31,77,43,0.12)",
+  background: "white",
+  color: "#1f4d2b",
+  fontWeight: "bold",
+  cursor: "pointer",
+  boxShadow: "0 6px 16px rgba(31,77,43,0.08)",
+}}>
           +
         </button>
 
-        <button onClick={() => setZoom((z) => Math.max(z - 0.2, 0.4))} style={{ padding: 8 }}>
+        <button onClick={() => setZoom((z) => Math.max(z - 0.2, 0.4))} style={{
+  padding: "10px 14px",
+  borderRadius: 14,
+  border: "1px solid rgba(31,77,43,0.12)",
+  background: "white",
+  color: "#1f4d2b",
+  fontWeight: "bold",
+  cursor: "pointer",
+  boxShadow: "0 6px 16px rgba(31,77,43,0.08)",
+}}>
           -
         </button>
 
@@ -789,7 +1202,16 @@ return (
     <select
       value={designPlant}
       onChange={(e) => setDesignPlant(e.target.value)}
-      style={{ padding: 8, marginRight: 8 }}
+      style={{
+  padding: "10px 14px",
+  borderRadius: 14,
+  border: "1px solid rgba(31,77,43,0.12)",
+  background: "white",
+  color: "#1f4d2b",
+  fontWeight: "bold",
+  cursor: "pointer",
+  boxShadow: "0 6px 16px rgba(31,77,43,0.08)",
+}}
     >
       <option value="">Choisir une plante</option>
 
@@ -811,6 +1233,7 @@ return (
       {zone.name}
     </option>
   ))}
+  
 </select>
 
     {selectedDesignPlant && (
@@ -872,7 +1295,14 @@ return (
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 20, alignItems: "flex-start" }}>
+      <div
+  style={{
+    display: "grid",
+    gridTemplateColumns: "minmax(0,1fr) 400px",
+    gap: 24,
+    alignItems: "start",
+  }}
+>
         <div
           onWheel={handleWheel}
           onMouseDown={handleMouseDown}
@@ -880,14 +1310,16 @@ return (
           onMouseUp={handleMouseUp}
           onMouseLeave={handleMouseUp}
           style={{
-            width: 900,
-            height: 800,
-            border: "2px solid #2f5d3a",
-            borderRadius: 12,
+           width: "100%",
+            height: 900,
+            border: "3px solid #2e7d32",
+boxShadow: "0 25px 60px rgba(0,0,0,0.25)",
+            borderRadius: 24,
             overflow: "hidden",
             position: "relative",
             userSelect: "none",
-            background: "#111",
+            background: "#1a1a1a",
+            backdropFilter: "blur(4px)",
             cursor: panMode ? (isPanning ? "grabbing" : "grab") : "default",
           }}
         >
@@ -954,10 +1386,35 @@ return (
             )}
 
             {plants.map((plant) => {
-              const diameterPx = (plant.adult_diameter || 0) * PIXELS_PER_METER;
-              const isMeasured = measurePlants.some((p) => p.id === plant.id);
+  const diameterPx =
+    (plant.adult_diameter || 0) * PIXELS_PER_METER;
 
-              return (
+  const isMeasured = measurePlants.some(
+    (p) => p.id === plant.id
+  );
+const logs = allPlantLogs.filter(
+  (log) => log.plant_id === plant.id
+);
+
+const lastLog = logs[0];
+
+let followDot = "🔴";
+
+if (lastLog) {
+  const days = Math.floor(
+    (Date.now() - new Date(lastLog.created_at).getTime()) /
+      (1000 * 60 * 60 * 24)
+  );
+
+  if (days < 30) {
+    followDot = "🟢";
+  } else if (days < 90) {
+    followDot = "🟠";
+  }
+}
+ 
+
+  return (
                 <div key={plant.id}>
                   {showAdultSize && plant.adult_diameter > 0 && (
                     <div
@@ -1009,7 +1466,14 @@ return (
                     title={plant.name}
                   >
                     <div style={{ fontSize: 32 }}>{getPlantIcon(plant.plant_type)}</div>
-
+<div
+  style={{
+    fontSize: 12,
+    marginTop: -4,
+  }}
+>
+  {followDot}
+</div>
                     {showPlantNames && (
                       <div style={{ fontWeight: "bold" }}>{plant.name}</div>
                     )}
@@ -1038,20 +1502,57 @@ return (
 
         <div
           style={{
-            width: 320,
-            minHeight: 500,
-            border: "1px solid #ccc",
-            borderRadius: 12,
-            padding: 20,
-            background: "#fff",
-            position: "sticky",
-            top: 20,
+            width: 380,
+minHeight: 500,
+border: "1px solid rgba(31,77,43,0.10)",
+borderRadius: 28,
+padding: 24,
+background: "rgba(255,255,255,0.92)",
+backdropFilter: "blur(10px)",
+boxShadow: "0 20px 45px rgba(31,77,43,0.18)",
+position: "sticky",
+top: 24,
           }}
         >
           {selectedPlant ? (
             <>
-              <h2>{selectedPlant.name}</h2>
+              <h2>
+  {plantFollowDot} {selectedPlant.name}
+</h2>
+<div
+  style={{
+    background: "#f5f5f5",
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 12,
+  }}
+>
+  <p>
+    📷 Photos : <strong>{photoCount}</strong>
+  </p>
 
+  <p>
+    📝 Observations : <strong>{observationCount}</strong>
+  </p>
+
+  <p>
+    🕒 Dernière observation :
+    <br />
+    <strong>
+      {lastObservation
+        ? new Date(lastObservation).toLocaleDateString("fr-FR")
+        : "Aucune"}
+    </strong>
+  </p>
+  <p
+  style={{
+    color: followColor,
+    fontWeight: "bold",
+  }}
+>
+  {followStatus}
+</p>
+</div>
               <input type="file" accept="image/*" onChange={uploadImage} />
 
               {selectedPlant.image_url && (
@@ -1123,7 +1624,8 @@ return (
   <div
     key={log.id}
     style={{
-      border: "1px solid #ddd",
+      border: "1px solid rgba(31,77,43,0.08)",
+       boxShadow: "0 12px 30px rgba(31,77,43,0.08)",
       borderRadius: 8,
       padding: 8,
       marginBottom: 8,
@@ -1314,6 +1816,7 @@ return (
           )}
         </div>
       </div>
+      </main>
     </div>
   );
 }
